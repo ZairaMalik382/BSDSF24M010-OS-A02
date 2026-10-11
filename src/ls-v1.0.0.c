@@ -1,6 +1,6 @@
 /*
 * Programming Assignment 02: ls
-* Version 1.1.0 - adds the -l (long listing) option
+* Version 1.2.0 - default output in columns (down then across)
 * Usage:
 *       $ ls
 *       $ ls -l
@@ -18,11 +18,14 @@
 #include <grp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 
 extern int errno;
 
 void do_ls(const char *dir, int long_flag);
 void do_ls_long(const char *dir);
+void display_columns(char **names, int count, int maxlen);
+int get_terminal_width(void);
 void mode_to_string(mode_t mode, char *str);
 const char *user_name(uid_t uid, char *buf, size_t n);
 const char *group_name(gid_t gid, char *buf, size_t n);
@@ -79,20 +82,94 @@ void do_ls(const char *dir, int long_flag)
         fprintf(stderr, "Cannot open directory : %s\n", dir);
         return;
     }
+
+    char **names = NULL;   /* dynamic array of filenames */
+    int count = 0;         /* how many names stored */
+    int capacity = 0;      /* how many slots allocated */
+    int maxlen = 0;        /* length of the longest filename */
+
     errno = 0;
     while ((entry = readdir(dp)) != NULL)
     {
         if (entry->d_name[0] == '.')
             continue;
-        printf("%s\n", entry->d_name);
+
+        /* Grow the array when it is full (double the size) */
+        if (count == capacity)
+        {
+            capacity = (capacity == 0) ? 16 : capacity * 2;
+            char **tmp = realloc(names, capacity * sizeof(char *));
+            if (tmp == NULL)
+            {
+                perror("realloc failed");
+                break;
+            }
+            names = tmp;
+        }
+
+        names[count] = strdup(entry->d_name);
+        if (names[count] == NULL)
+        {
+            perror("strdup failed");
+            break;
+        }
+        int len = (int)strlen(names[count]);
+        if (len > maxlen)
+            maxlen = len;
+        count++;
     }
 
     if (errno != 0)
     {
         perror("readdir failed");
     }
-
     closedir(dp);
+
+    if (count > 0)
+        display_columns(names, count, maxlen);
+
+    /* Free every string, then the array itself */
+    for (int i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
+}
+
+/* Get the terminal width using ioctl; fall back to 80 columns */
+int get_terminal_width(void)
+{
+    struct winsize w;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1 || w.ws_col == 0)
+        return 80;
+    return w.ws_col;
+}
+
+/* Print names in columns, "down then across" */
+void display_columns(char **names, int count, int maxlen)
+{
+    int term_width = get_terminal_width();
+    int col_width = maxlen + 2;          /* longest name + 2 spaces */
+    int cols = term_width / col_width;   /* how many columns fit */
+    if (cols < 1)
+        cols = 1;
+    if (cols > count)
+        cols = count;
+    int rows = (count + cols - 1) / cols; /* ceiling of count / cols */
+
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            int idx = r + c * rows;      /* down-then-across index */
+            if (idx >= count)
+                break;
+            int next = idx + rows;       /* next item on this row */
+            if (c + 1 < cols && next < count)
+                printf("%-*s", col_width, names[idx]);
+            else
+                printf("%s", names[idx]);
+        }
+        printf("\n");
+    }
 }
 
 /* Long listing: like "ls -l". Two passes so the columns line up. */
